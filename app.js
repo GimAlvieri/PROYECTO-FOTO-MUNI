@@ -733,7 +733,13 @@
       fotosPorFolio.get(foto.folioId).push(foto);
     });
     fotosPorFolio.forEach((fotos) => fotos.sort((a, b) => a.orden - b.orden));
-    const resultados = estado.fotosGlobales
+    const posicionFolio = new Map(estado.folios.map((folio, indice) => [folio.id, indice]));
+    const fotosOrdenadas = [...estado.fotosGlobales].sort((a, b) => {
+      const ordenA = posicionFolio.get(a.folioId) ?? Number.MAX_SAFE_INTEGER;
+      const ordenB = posicionFolio.get(b.folioId) ?? Number.MAX_SAFE_INTEGER;
+      return ordenA - ordenB || a.orden - b.orden;
+    });
+    const resultados = fotosOrdenadas
       .map((foto) => {
         const fotosDelMismoFolio = fotosPorFolio.get(foto.folioId) || [];
         const indice = fotosDelMismoFolio.findIndex((item) => item.id === foto.id);
