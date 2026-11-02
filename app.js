@@ -24,6 +24,7 @@
     fotosGlobales: [],    // fotos de todos los folios para la galería y exportación
     urls: new Map(),      // id de foto -> URL temporal SOLO para mostrar en pantalla
     pendientes: new Map(),// id de foto -> temporizador de guardado de descripción
+    movimientosEnCurso: new Set(),
     ocupado: false,       // hay fotos en proceso de confirmación
     flujoCamara: null,
   };
@@ -561,33 +562,32 @@
 
   async function moverFoto(id, delta, accion) {
     const foto = buscarFoto(id);
-    if (!foto) return;
+    if (!foto || estado.movimientosEnCurso.has(foto.folioId)) return;
     const fotos = fotosDelFolio(foto.folioId);
     const i = fotos.findIndex((f) => f.id === id);
     const j = i + delta;
     if (i < 0 || j < 0 || j >= fotos.length) return;
-    await guardarPendientes();
-
-    [fotos[i], fotos[j]] = [fotos[j], fotos[i]];
-    const cambiadas = [];
-    fotos.forEach((fotoOrdenada, indice) => {
-      if (fotoOrdenada.orden !== indice) {
-        fotoOrdenada.orden = indice;
-        cambiadas.push(fotoOrdenada);
-      }
-    });
+    estado.movimientosEnCurso.add(foto.folioId);
     try {
-      await BaseDatos.guardarFotos(cambiadas);
-      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotos;
+      await guardarPendientes();
+      [fotos[i], fotos[j]] = [fotos[j], fotos[i]];
+      const fotosActualizadas = fotos.map((fotoOrdenada, indice) => ({
+        ...fotoOrdenada,
+        orden: indice,
+      }));
+      await BaseDatos.guardarFotos(fotosActualizadas);
+
+      const actualizadasPorId = new Map(fotosActualizadas.map((item) => [item.id, item]));
+      estado.fotosGlobales = estado.fotosGlobales.map((item) => actualizadasPorId.get(item.id) || item);
+      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotosActualizadas;
       renderTodo();
       const boton = el.galeria.querySelector(`li[data-id="${id}"] [data-accion="${accion}"]`);
       if (boton && !boton.disabled) boton.focus();
     } catch (error) {
-      [fotos[i], fotos[j]] = [fotos[j], fotos[i]];
-      fotos.forEach((fotoOrdenada, indice) => { fotoOrdenada.orden = indice; });
-      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotos;
       renderTodo();
       mostrarMensaje(`No se pudo mover la foto: ${textoError(error)}`, 'error');
+    } finally {
+      estado.movimientosEnCurso.delete(foto.folioId);
     }
   }
 
