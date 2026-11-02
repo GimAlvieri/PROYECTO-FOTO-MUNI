@@ -131,6 +131,10 @@ const BaseDatos = (() => {
     return fotos.sort((a, b) => a.orden - b.orden);
   }
 
+  function listarTodasFotos() {
+    return transaccion('fotos', 'readonly', (tx) => tx.objectStore('fotos').getAll());
+  }
+
   function eliminarFoto(id) {
     return transaccion('fotos', 'readwrite', (tx) => tx.objectStore('fotos').delete(id));
   }
@@ -138,6 +142,6 @@ const BaseDatos = (() => {
   return {
     abrir,
     guardarFolio, listarFolios, obtenerFolio, eliminarFolio,
-    guardarFoto, guardarFotos, listarFotos, eliminarFoto,
+    guardarFoto, guardarFotos, listarFotos, listarTodasFotos, eliminarFoto,
   };
 })();
