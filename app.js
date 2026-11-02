@@ -21,6 +21,7 @@
     folios: [],        // lista de folios guardados
     folio: null,       // folio abierto (null = folio nuevo sin guardar)
     fotos: [],            // fotos del folio abierto, en el orden final
+    fotosGlobales: [],    // fotos de todos los folios para la galería y exportación
     urls: new Map(),      // id de foto -> URL temporal SOLO para mostrar en pantalla
     pendientes: new Map(),// id de foto -> temporizador de guardado de descripción
     ocupado: false,       // hay fotos en proceso de confirmación
@@ -236,10 +237,11 @@
     try {
       const folio = await BaseDatos.obtenerFolio(id);
       if (!folio) throw new Error('El folio ya no existe.');
-      const fotos = await BaseDatos.listarFotos(id);   // solo las fotos de ESTE folio
+      const fotosGlobales = await BaseDatos.listarTodasFotos();
       liberarUrls();
       estado.folio = adaptarFolioGuardado(folio);
-      estado.fotos = fotos;
+      estado.fotosGlobales = fotosGlobales;
+      estado.fotos = fotosGlobales.filter((foto) => foto.folioId === id);
       ultimoFolio(id);
       escribirFormulario(folio);
       ocultarProblemas();
@@ -289,7 +291,11 @@
       estado.fotos = [];
       await cargarListaFolios();
       if (estado.folios.length) await abrirFolio(estado.folios[0].id);
-      else { escribirFormulario(null); actualizarInterfaz(); }
+      else {
+        estado.fotosGlobales = await BaseDatos.listarTodasFotos();
+        escribirFormulario(null);
+        actualizarInterfaz();
+      }
     } catch (error) {
       mostrarMensaje(`No se pudo eliminar el folio: ${textoError(error)}`, 'error');
     }
@@ -374,6 +380,7 @@
     };
     await BaseDatos.guardarFoto(foto);                // espera la confirmación del guardado
     estado.fotos.push(foto);
+    estado.fotosGlobales.push(foto);
     renderTodo();
   }
 
@@ -505,16 +512,14 @@
      3. ORGANIZACIÓN: descripciones, mover, eliminar
      ============================================================ */
   function buscarFoto(id) {
-    return estado.fotos.find((f) => f.id === id);
+    return estado.fotosGlobales.find((f) => f.id === id)
+      || estado.fotos.find((f) => f.id === id);
   }
 
-  // Deja orden = posición en el arreglo. Devuelve las fotos que cambiaron.
-  function renumerar() {
-    const cambiadas = [];
-    estado.fotos.forEach((foto, i) => {
-      if (foto.orden !== i) { foto.orden = i; cambiadas.push(foto); }
-    });
-    return cambiadas;
+  function fotosDelFolio(folioId) {
+    return estado.fotosGlobales
+      .filter((foto) => foto.folioId === folioId)
+      .sort((a, b) => a.orden - b.orden);
   }
 
   function programarGuardadoDescripcion(id, texto) {
@@ -555,28 +560,42 @@
   }
 
   async function moverFoto(id, delta, accion) {
-    const i = estado.fotos.findIndex((f) => f.id === id);
+    const foto = buscarFoto(id);
+    if (!foto) return;
+    const fotos = fotosDelFolio(foto.folioId);
+    const i = fotos.findIndex((f) => f.id === id);
     const j = i + delta;
-    if (i < 0 || j < 0 || j >= estado.fotos.length) return;
+    if (i < 0 || j < 0 || j >= fotos.length) return;
     await guardarPendientes();
 
-    [estado.fotos[i], estado.fotos[j]] = [estado.fotos[j], estado.fotos[i]];
-    const cambiadas = renumerar();
+    [fotos[i], fotos[j]] = [fotos[j], fotos[i]];
+    const cambiadas = [];
+    fotos.forEach((fotoOrdenada, indice) => {
+      if (fotoOrdenada.orden !== indice) {
+        fotoOrdenada.orden = indice;
+        cambiadas.push(fotoOrdenada);
+      }
+    });
     try {
       await BaseDatos.guardarFotos(cambiadas);
+      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotos;
       renderTodo();
       const boton = el.galeria.querySelector(`li[data-id="${id}"] [data-accion="${accion}"]`);
       if (boton && !boton.disabled) boton.focus();
     } catch (error) {
-      [estado.fotos[i], estado.fotos[j]] = [estado.fotos[j], estado.fotos[i]];   // deshacer
-      renumerar();
+      [fotos[i], fotos[j]] = [fotos[j], fotos[i]];
+      fotos.forEach((fotoOrdenada, indice) => { fotoOrdenada.orden = indice; });
+      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotos;
       renderTodo();
       mostrarMensaje(`No se pudo mover la foto: ${textoError(error)}`, 'error');
     }
   }
 
   async function eliminarFoto(id) {
-    const indice = estado.fotos.findIndex((f) => f.id === id);
+    const foto = buscarFoto(id);
+    if (!foto) return;
+    const fotos = fotosDelFolio(foto.folioId);
+    const indice = fotos.findIndex((f) => f.id === id);
     if (indice < 0) return;
     const etiqueta = Exportar.etiquetaFoto(indice);
     if (!(await confirmar(`¿Eliminar la ${etiqueta}? Esta acción no se puede deshacer.`))) return;
@@ -584,12 +603,20 @@
     await guardarPendientes();
     try {
       await BaseDatos.eliminarFoto(id);
-      const [quitada] = estado.fotos.splice(indice, 1);
+      const [quitada] = fotos.splice(indice, 1);
+      estado.fotosGlobales = estado.fotosGlobales.filter((f) => f.id !== id);
       if (estado.urls.has(quitada.id)) {
         URL.revokeObjectURL(estado.urls.get(quitada.id));
         estado.urls.delete(quitada.id);
       }
-      const cambiadas = renumerar();               // la numeración se corrige sola
+      const cambiadas = [];
+      fotos.forEach((fotoOrdenada, posicion) => {
+        if (fotoOrdenada.orden !== posicion) {
+          fotoOrdenada.orden = posicion;
+          cambiadas.push(fotoOrdenada);
+        }
+      });
+      if (estado.folio && estado.folio.id === foto.folioId) estado.fotos = fotos;
       if (cambiadas.length) await BaseDatos.guardarFotos(cambiadas);
       renderTodo();
       mostrarMensaje(`${etiqueta} eliminada. La numeración se actualizó.`);
@@ -605,7 +632,7 @@
     const hayFolio = Boolean(estado.folio);
     el.btnTomar.disabled = !hayFolio;
     el.btnAgregar.disabled = !hayFolio;
-    el.btnGenerar.disabled = !hayFolio;
+    el.btnGenerar.disabled = !estado.fotosGlobales.length;
     el.btnEliminarFolio.disabled = !hayFolio;
     el.avisoSinFolio.hidden = hayFolio;
     renderTodo();
@@ -616,7 +643,7 @@
     renderVistaPrevia();
   }
 
-  function crearTarjeta(foto, indice, total) {
+  function crearTarjeta(foto, indice, total, folio) {
     const li = document.createElement('li');
     li.className = 'tarjeta';
     li.dataset.id = foto.id;
@@ -628,7 +655,10 @@
     const estadoDescripcion = document.createElement('span');
     estadoDescripcion.className = `estado-foto ${foto.descripcion.trim() ? 'asignada' : 'pendiente'}`;
     estadoDescripcion.textContent = foto.descripcion.trim() ? 'Descrita' : 'Pendiente';
-    cab.append(numero, estadoDescripcion);
+    const identificadorFolio = document.createElement('span');
+    identificadorFolio.className = 'tarjeta-folio';
+    identificadorFolio.textContent = `Folio N.º ${folio.numeroFolio || 's/n'} · ${folio.anio || 'sin año'}`;
+    cab.append(numero, identificadorFolio, estadoDescripcion);
 
     const marco = document.createElement('div');
     marco.className = 'tarjeta-img';
@@ -683,39 +713,54 @@
 
   function renderGaleria() {
     el.galeria.innerHTML = '';
-    if (!estado.fotos.length) {
+    if (!estado.fotosGlobales.length) {
       el.resumenFotos.textContent = 'Fotos registradas: 0.';
       const vacio = document.createElement('li');
       vacio.className = 'vacio';
       vacio.textContent = estado.folio
-        ? 'Todavía no hay fotos. Usa "Tomar foto" o "Agregar imágenes".'
-        : 'Las fotos del folio aparecerán aquí.';
+        ? 'Todavía no hay fotos en los folios guardados. Usa "Tomar foto" o "Agregar imágenes" para añadirlas al folio seleccionado.'
+        : 'Las fotos de los folios aparecerán aquí.';
       el.galeria.appendChild(vacio);
       return;
     }
     const consulta = normalizarBusqueda(el.buscarFotos.value.trim());
     const filtro = el.filtroFotos.value;
-    const conDescripcion = estado.fotos.filter((foto) => foto.descripcion.trim()).length;
-    const pendientes = estado.fotos.length - conDescripcion;
-    const resultados = estado.fotos
-      .map((foto, indice) => ({ foto, indice }))
+    const conDescripcion = estado.fotosGlobales.filter((foto) => foto.descripcion.trim()).length;
+    const pendientes = estado.fotosGlobales.length - conDescripcion;
+    const fotosPorFolio = new Map();
+    estado.fotosGlobales.forEach((foto) => {
+      if (!fotosPorFolio.has(foto.folioId)) fotosPorFolio.set(foto.folioId, []);
+      fotosPorFolio.get(foto.folioId).push(foto);
+    });
+    fotosPorFolio.forEach((fotos) => fotos.sort((a, b) => a.orden - b.orden));
+    const resultados = estado.fotosGlobales
+      .map((foto) => {
+        const fotosDelMismoFolio = fotosPorFolio.get(foto.folioId) || [];
+        const indice = fotosDelMismoFolio.findIndex((item) => item.id === foto.id);
+        const registroFolio = estado.folios.find((item) => item.id === foto.folioId)
+          || (estado.folio && estado.folio.id === foto.folioId ? estado.folio : null);
+        return {
+          foto,
+          indice,
+          total: fotosDelMismoFolio.length,
+          folio: adaptarFolioGuardado(registroFolio) || {},
+        };
+      })
       .filter(({ foto, indice }) => {
         const tieneDescripcion = Boolean(foto.descripcion.trim());
         if (filtro === 'descritas' && !tieneDescripcion) return false;
         if (filtro === 'pendientes' && tieneDescripcion) return false;
         if (!consulta) return true;
-        const texto = normalizarBusqueda([
-          Exportar.etiquetaFoto(indice),
-          foto.nombreOriginal,
-          foto.descripcion,
-          formatoFechaHora(foto.fechaIncorporacion),
-          estado.folio ? Object.values(adaptarFolioGuardado(estado.folio)).join(' ') : '',
-        ].join(' '));
-        return texto.includes(consulta);
+        const numeroFoto = String(indice + 1);
+        const consultaNumerica = consulta.replace(/^0+/, '') || '0';
+        const coincideNumero = /^\d+$/.test(consulta)
+          && numeroFoto === consultaNumerica;
+        const coincideDescripcion = normalizarBusqueda(foto.descripcion).includes(consulta);
+        return coincideNumero || coincideDescripcion;
       });
 
     el.resumenFotos.textContent =
-      `Registradas: ${estado.fotos.length} · Con descripción: ${conDescripcion} · Pendientes: ${pendientes} · Mostrando: ${resultados.length}`;
+      `Registradas: ${estado.fotosGlobales.length} · Con descripción: ${conDescripcion} · Pendientes: ${pendientes} · Mostrando: ${resultados.length}`;
     if (!resultados.length) {
       const vacio = document.createElement('li');
       vacio.className = 'vacio';
@@ -723,9 +768,8 @@
       el.galeria.appendChild(vacio);
       return;
     }
-    const total = estado.fotos.length;
-    resultados.forEach(({ foto, indice }) =>
-      el.galeria.appendChild(crearTarjeta(foto, indice, total)));
+    resultados.forEach(({ foto, indice, total, folio }) =>
+      el.galeria.appendChild(crearTarjeta(foto, indice, total, folio)));
   }
 
   function normalizarBusqueda(texto) {
@@ -827,25 +871,51 @@
     el.galeria.querySelectorAll('.invalido').forEach((n) => n.classList.remove('invalido'));
   }
 
-  function validarParaExportar() {
+  function gruposParaExportar() {
+    const filtro = el.filtroFotos.value;
+    const fotosSeleccionadas = estado.fotosGlobales.filter((foto) => {
+      const descrita = Boolean(foto.descripcion.trim());
+      if (filtro === 'descritas') return descrita;
+      if (filtro === 'pendientes') return !descrita;
+      return true;
+    });
+
+    return estado.folios
+      .map((registro) => {
+        const folio = adaptarFolioGuardado(registro);
+        const fotos = fotosSeleccionadas
+          .filter((foto) => foto.folioId === folio.id)
+          .sort((a, b) => a.orden - b.orden);
+        return { folio, fotos };
+      })
+      .filter((grupo) => grupo.fotos.length);
+  }
+
+  function validarParaExportar(grupos) {
     const problemas = [];
-    if (!estado.folio) {
-      problemas.push({ mensaje: 'Crea o abre un folio.' });
+    if (!grupos.length) {
+      problemas.push({
+        mensaje: el.filtroFotos.value === 'descritas'
+          ? 'No hay fotos con descripción para exportar.'
+          : el.filtroFotos.value === 'pendientes'
+            ? 'No hay fotos pendientes de descripción para exportar.'
+            : 'No hay fotos registradas para exportar.',
+      });
       return problemas;
     }
-    const datos = leerFormulario();
-    validarFolio(datos).forEach((e) => problemas.push({ mensaje: `Datos del folio: ${e.mensaje}` }));
-    if (hayCambiosSinGuardar()) {
-      problemas.push({ mensaje: 'Hay cambios sin guardar en los datos del folio. Pulsa "Guardar folio".' });
-    }
-    if (!estado.fotos.length) {
-      problemas.push({ mensaje: 'Agrega al menos una fotografía.' });
-    }
-    estado.fotos.forEach((foto, i) => {
-      if (!foto.descripcion.trim()) {
-        problemas.push({ mensaje: `${Exportar.etiquetaFoto(i)}: falta la descripción.`, fotoId: foto.id });
+
+    grupos.forEach(({ folio, fotos }) => {
+      const nombreFolio = `Folio N.º ${folio.numeroFolio || 's/n'}`;
+      validarFolio(folio).forEach((e) =>
+        problemas.push({ mensaje: `${nombreFolio}: ${e.mensaje}` }));
+      if (estado.folio && estado.folio.id === folio.id && hayCambiosSinGuardar()) {
+        problemas.push({ mensaje: `${nombreFolio}: hay cambios sin guardar. Pulsa "Guardar folio".` });
       }
+      fotos.forEach((foto) => {
+        if (!foto.blob) problemas.push({ mensaje: `${nombreFolio}: no se pudo leer una fotografía.` });
+      });
     });
+
     return problemas;
   }
 
@@ -882,7 +952,8 @@
 
   async function generarWord() {
     await guardarPendientes();
-    const problemas = validarParaExportar();
+    const grupos = gruposParaExportar();
+    const problemas = validarParaExportar(grupos);
     mostrarProblemas(problemas);
     if (problemas.length) {
       mostrarMensaje(`No se generó el Word: hay ${problemas.length} punto(s) por corregir.`, 'error');
@@ -898,25 +969,29 @@
     const textoOriginal = el.btnGenerar.textContent;
     el.btnGenerar.textContent = 'Generando…';
     try {
-      // Cada foto se incluye una sola vez, en el orden actual de la galería
-      const fotosDoc = [];
-      for (const foto of estado.fotos) {
-        fotosDoc.push({
-          bytes: new Uint8Array(await foto.blob.arrayBuffer()),
-          ancho: foto.ancho,
-          alto: foto.alto,
-          descripcion: foto.descripcion.trim(),
-        });
+      const gruposDoc = [];
+      for (const grupo of grupos) {
+        const fotosDoc = [];
+        for (const foto of grupo.fotos) {
+          fotosDoc.push({
+            bytes: new Uint8Array(await foto.blob.arrayBuffer()),
+            ancho: foto.ancho,
+            alto: foto.alto,
+            descripcion: foto.descripcion.trim(),
+          });
+        }
+        gruposDoc.push({ folio: grupo.folio, fotos: fotosDoc });
       }
-      const documento = Exportar.crearDocumento(estado.folio, fotosDoc, docx);
+      const documento = Exportar.crearDocumentoAgrupado(gruposDoc, docx);
       const archivo = await docx.Packer.toBlob(documento);
-      descargar(archivo, Exportar.nombreArchivo(estado.folio));
-      mostrarMensaje(`Word generado con ${fotosDoc.length} foto(s).`);
+      const cantidadFotos = gruposDoc.reduce((total, grupo) => total + grupo.fotos.length, 0);
+      descargar(archivo, Exportar.nombreArchivo(gruposDoc));
+      mostrarMensaje(`Word generado con ${cantidadFotos} foto(s) de ${gruposDoc.length} folio(s).`);
     } catch (error) {
       mostrarMensaje(`No se pudo generar el Word: ${textoError(error)}`, 'error');
     } finally {
       el.btnGenerar.textContent = textoOriginal;
-      el.btnGenerar.disabled = !estado.folio;
+      el.btnGenerar.disabled = !estado.fotosGlobales.length;
     }
   }
 
